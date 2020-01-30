@@ -1,0 +1,214 @@
+## TauGC qiime2 v. 1.0 - Jan 2020
+
+###############################################################################
+
+## SET WORKDIR
+BASE_DIR = "fastq"
+HOME_DIR = "/home/user"
+TOOL_DIR = HOME_DIR + "/tools"
+REFERENCE_DIR = "/db/rRNA/qiime2"
+
+## SET TOOLDIR
+QIIME2_DIR= ""
+
+## SET VARIABLES
+dada_clip_end = "10"
+dada_clip_trunc_len = "250"
+metadata="sample.metadata.tsv"
+sampling_depth="17064"
+green_genes= REFERENCE_DIR + "/gg-13-8-99-515-806-nb-classifier.qza"
+silva= REFERENCE_DIR + "/silva-132-99-nb-classifier.qza"
+threads_dada="6"
+
+################################################################################
+
+## samples
+
+SAMPLES,= glob_wildcards("fastq/{smp}_L001_R1_001.fastq.gz")
+NB_SAMPLES = len(SAMPLES)
+
+## rules
+#ruleorder: core_metrics_phylogenetic > alpha_diversity_sig
+
+rule all:
+	input:
+		"fastq/taxa-bar-plots-gg.qzv",
+		"fastq/taxa-bar-plots-silva.qzv",
+		"fastq/taxonomy-gg.qzv",
+		"fastq/taxonomy-silva.qzv",
+		"fastq/alpha-rarefaction.qzv",
+#		"fastq/faith-pd-group-significance.qzv", #comment out for groups
+#		"fastq/evenness-group-significance.qzv", #comment out for groups
+		"fastq/table.qzv",
+		"fastq/rep-seqs.qzv",
+		"fastq/denoising-stats.qzv",
+		"fastq/demux.qzv",
+		"fastq/metrics.ok"
+
+rule import_data:
+	output:
+		qza="{BASE_DIR}/demux-paired-end.qza"
+	shell:"""
+		qiime tools import --type 'SampleData[PairedEndSequencesWithQuality]' --input-path {BASE_DIR} --input-format CasavaOneEightSingleLanePerSampleDirFmt --output-path {output.qza}
+	"""
+
+rule demux_summarize:
+	input:
+		qza="{BASE_DIR}/demux-paired-end.qza"
+	output:
+		qzv="{BASE_DIR}/demux.qzv"
+	shell:"""
+		qiime demux summarize --i-data {input.qza} --o-visualization {output.qzv}
+	"""
+
+rule denoising_data:
+	input:
+		qza="{BASE_DIR}/demux-paired-end.qza"
+	output:
+		table= "{BASE_DIR}/table.qza",
+		represent_sequences= "{BASE_DIR}/rep-seq.qza",
+		denoising_stats="{BASE_DIR}/denoising-stats.qza"
+	shell:"""
+		qiime dada2 denoise-paired --i-demultiplexed-seqs {input} --p-n-threads {threads_dada} --p-trim-left-f {dada_clip_end} --p-trim-left-r {dada_clip_end} --p-trunc-len-f {dada_clip_trunc_len} --p-trunc-len-r {dada_clip_trunc_len} --o-table {output.table} --o-representative-sequences {output.represent_sequences} --o-denoising-stats {output.denoising_stats}
+	"""
+
+rule metadata_tabulate_denoising:
+	input: 
+		denoising_stats="{BASE_DIR}/denoising-stats.qza"
+	output:
+		denoising_vis="{BASE_DIR}/denoising-stats.qzv"
+	shell:"""
+		qiime metadata tabulate --m-input-file {input.denoising_stats} --o-visualization {output.denoising_vis}
+	"""
+
+rule feature_table:
+	input:
+		 table= "{BASE_DIR}/table.qza",
+		 represent_sequences= "{BASE_DIR}/rep-seq.qza"
+	output:
+		feature_table="{BASE_DIR}/table.qzv",
+		feature_repseqs="{BASE_DIR}/rep-seqs.qzv"
+	shell:"""
+		qiime feature-table summarize --i-table {input.table} --o-visualization {output.feature_table} --m-sample-metadata-file {metadata}
+		qiime feature-table tabulate-seqs --i-data {input.represent_sequences} --o-visualization {output.feature_repseqs}
+	"""
+
+rule tree_phylogenetic_diversity:
+	input:
+		represent_sequences= "{BASE_DIR}/rep-seq.qza"
+	output:
+		aligned_rep="{BASE_DIR}/aligned-rep-seqs.qza",
+		masked_aligned="{BASE_DIR}/masked_aligned.qza",
+		unrooted_tree="{BASE_DIR}/unrooted-tree.qza",
+		rooted_tree="{BASE_DIR}/rooted-tree.qza"
+	shell:"""
+		qiime phylogeny align-to-tree-mafft-fasttree --i-sequences {input.represent_sequences} --o-alignment {output.aligned_rep} --o-masked-alignment {output.masked_aligned} --o-tree {output.unrooted_tree} --o-rooted-tree {output.rooted_tree}
+	"""
+
+##must be categorical in metadata
+#test qiime diversity alpha-correlation
+
+rule core_metrics_phylogenetic:
+	input:
+		rooted_tree= "{BASE_DIR}/rooted-tree.qza",
+		table= "{BASE_DIR}/table.qza"
+	output:
+		metrics_check="{BASE_DIR}/metrics.ok"		
+	shell:"""
+		qiime diversity core-metrics-phylogenetic --i-phylogeny {input.rooted_tree} --i-table {input.table} --p-sampling-depth {sampling_depth} --m-metadata-file {metadata} --output-dir {BASE_DIR}/core-metrics-results
+		touch {output.metrics_check}
+	"""
+
+rule alpha_diversity_sig:
+	input:
+		metrics_check="{BASE_DIR}/metrics.ok"
+	output:
+		faith_group_sig="{BASE_DIR}/faith-pd-group-significance.qzv",
+		evenness_group_sig="{BASE_DIR}/evenness-group-significance.qzv"
+	shell:"""
+		ls {input.metrics_check}
+		qiime diversity alpha-group-significance --i-alpha-diversity fastq/core-metrics-results/faith_pd_vector.qza --m-metadata-file {metadata} --o-visualization {output.faith_group_sig}
+		qiime diversity alpha-group-significance --i-alpha-diversity fastq/core-metrics-results/evenness_vector.qza --m-metadata-file {metadata} --o-visualization {output.evenness_group_sig}
+	"""
+
+rule alpha_rarefaction:
+	input:
+		table= "{BASE_DIR}/table.qza",
+		rooted_tree= "{BASE_DIR}/rooted-tree.qza"
+	output:
+		alpha_rarefaction= "{BASE_DIR}/alpha-rarefaction.qzv"
+	shell:"""
+		qiime diversity alpha-rarefaction --i-table {input.table} --i-phylogeny {input.rooted_tree} --p-max-depth 4000 --m-metadata-file {metadata} --o-visualization {output.alpha_rarefaction}
+	"""
+
+rule feature_classifier_greengenes:
+	input: 
+		represent_seqs="{BASE_DIR}/rep-seq.qza"
+	output:
+		taxonomy_gg="{BASE_DIR}/taxonomy-gg.qza"
+	shell:"""
+		qiime feature-classifier classify-sklearn --i-classifier {green_genes} --i-reads {input.represent_seqs} --o-classification {output.taxonomy_gg}
+	"""
+
+rule feature_classifier_silva:
+	input: 
+		represent_seqs="{BASE_DIR}/rep-seq.qza"
+	output:
+		taxonomy_silva="{BASE_DIR}/taxonomy-silva.qza"
+	shell:"""
+		qiime feature-classifier classify-sklearn --i-classifier {silva} --i-reads {input.represent_seqs} --o-classification {output.taxonomy_silva}
+	"""
+
+rule metadata_tabulate:
+	input:
+		taxonomy_gg="{BASE_DIR}/taxonomy-gg.qza",
+		taxonomy_silva="{BASE_DIR}/taxonomy-silva.qza"
+	output:
+		taxonomy_tabulate_gg="{BASE_DIR}/taxonomy-gg.qzv",
+		taxonomy_tabulate_silva="{BASE_DIR}/taxonomy-silva.qzv"
+	shell:"""
+		qiime metadata tabulate --m-input-file {input.taxonomy_gg} --o-visualization {output.taxonomy_tabulate_gg}
+		qiime metadata tabulate --m-input-file {input.taxonomy_silva} --o-visualization {output.taxonomy_tabulate_silva}
+	"""
+
+rule taxa_barplot:
+	input:
+		table= "{BASE_DIR}/table.qza",
+		taxonomy_gg="{BASE_DIR}/taxonomy-gg.qza",
+		taxonomy_silva="{BASE_DIR}/taxonomy-silva.qza"
+	output:
+		taxonomy_barplot_gg="{BASE_DIR}/taxa-bar-plots-gg.qzv",
+		taxonomy_barplot_silva="{BASE_DIR}/taxa-bar-plots-silva.qzv"
+	shell:"""
+		qiime taxa barplot --i-table {input.table} --i-taxonomy {input.taxonomy_gg} --m-metadata-file {metadata} --o-visualization {output.taxonomy_barplot_gg}
+		qiime taxa barplot --i-table {input.table} --i-taxonomy {input.taxonomy_silva} --m-metadata-file {metadata} --o-visualization {output.taxonomy_barplot_silva}
+	"""
+
+  
+
+#templates:
+# qiime diversity beta-group-significance \
+#   --i-distance-matrix core-metrics-results/unweighted_unifrac_distance_matrix.qza \
+#   --m-metadata-file sample-metadata.tsv \
+#   --m-metadata-column body-site \
+#   --o-visualization core-metrics-results/unweighted-unifrac-body-site-significance.qzv \
+#   --p-pairwise
+
+# qiime diversity beta-group-significance \
+#   --i-distance-matrix core-metrics-results/unweighted_unifrac_distance_matrix.qza \
+#   --m-metadata-file sample-metadata.tsv \
+#   --m-metadata-column subject \
+#   --o-visualization core-metrics-results/unweighted-unifrac-subject-group-significance.qzv \
+#   --p-pairwise
+
+#   qiime emperor plot \
+#   --i-pcoa core-metrics-results/unweighted_unifrac_pcoa_results.qza \
+#   --m-metadata-file sample-metadata.tsv \
+#   --p-custom-axes days-since-experiment-start \
+#   --o-visualization core-metrics-results/unweighted-unifrac-emperor-days-since-experiment-start.qzv
+
+# qiime emperor plot \
+#   --i-pcoa core-metrics-results/bray_curtis_pcoa_results.qza \
+#   --m-metadata-file sample-metadata.tsv \
+#   --p-custom-axes days-since-experiment-start \
+#   --o-visualization core-metrics-results/bray-curtis-emperor-days-since-experiment-start.qzv
